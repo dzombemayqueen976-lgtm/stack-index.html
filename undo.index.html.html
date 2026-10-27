@@ -1,0 +1,925 @@
+<title>Undo Stack Editor</title>
+<meta name="claude:viewport-fit-sides" content="cover" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+  rel="stylesheet"
+  href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600&family=DM+Mono:wght@400;500&display=swap"
+/>
+<style>
+  /* Layout: toolbar with undo and redo, the poster editor beside its live preview, then the two stacks side by side, then the operation log. */
+  :root {
+    --bg: #eeedf5;
+    --surface: #ffffff;
+    --surface-2: #f5f4fa;
+    --fg: #1b1833;
+    --muted: #5e5b78;
+    --line: #d9d7e6;
+    --accent: #4a35c8;
+    --accent-fg: #ffffff;
+    --redo: #b4235a;
+    --redo-fg: #ffffff;
+    --font-display:
+      "Bricolage Grotesque", "Arial Narrow", system-ui, sans-serif;
+    --font-body:
+      "Hanken Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "DM Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12111e;
+      --surface: #1b1930;
+      --surface-2: #242140;
+      --fg: #e9e7f8;
+      --muted: #a09dbf;
+      --line: #34305a;
+      --accent: #9b8cff;
+      --accent-fg: #14102e;
+      --redo: #ff7aa8;
+      --redo-fg: #2a0a18;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12111e;
+    --surface: #1b1930;
+    --surface-2: #242140;
+    --fg: #e9e7f8;
+    --muted: #a09dbf;
+    --line: #34305a;
+    --accent: #9b8cff;
+    --accent-fg: #14102e;
+    --redo: #ff7aa8;
+    --redo-fg: #2a0a18;
+    color-scheme: dark;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-body);
+    font-size: 15px;
+    line-height: 1.5;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 24px 32px;
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .app {
+    max-width: 1080px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  h1 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-size: 38px;
+    line-height: 1.05;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  .sub {
+    margin: 6px 0 0;
+    color: var(--muted);
+    max-width: 66ch;
+  }
+  h2 {
+    margin: 0 0 12px;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 20px;
+    line-height: 1.15;
+  }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 18px;
+    min-width: 0;
+  }
+
+  /* Toolbar */
+  .bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 12px;
+  }
+  .btn {
+    font: 600 14px/1.2 var(--font-body);
+    padding: 10px 16px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .btn:hover:not(:disabled) {
+    filter: brightness(0.95);
+  }
+  .btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .btn.undo {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-fg);
+  }
+  .btn.redo {
+    background: var(--redo);
+    border-color: var(--redo);
+    color: var(--redo-fg);
+  }
+  .btn.small {
+    padding: 6px 10px;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .keys {
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  kbd {
+    font: 500 12px var(--font-mono);
+    padding: 1px 6px;
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    background: var(--surface-2);
+  }
+  .status {
+    margin: 14px 0 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--muted);
+    min-height: 1.5em;
+  }
+
+  /* Editor and preview */
+  .work {
+    display: grid;
+    grid-template-columns: minmax(0, 340px) minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+  }
+  form {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .field > label,
+  .legend {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+  }
+  input[type="text"],
+  textarea {
+    width: 100%;
+    font: inherit;
+    padding: 9px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--fg);
+  }
+  textarea {
+    resize: vertical;
+    min-height: 84px;
+  }
+  .hint {
+    margin: 0;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .swatches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .sw {
+    width: 36px;
+    height: 36px;
+    border-radius: 6px;
+    border: 2px solid var(--surface);
+    box-shadow: 0 0 0 1px var(--line);
+    cursor: pointer;
+    padding: 0;
+  }
+  .sw[aria-pressed="true"] {
+    box-shadow: 0 0 0 2px var(--fg);
+  }
+  .seg {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .seg button {
+    font: 500 14px var(--font-body);
+    padding: 8px;
+    border: 0;
+    border-right: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  .seg button:last-child {
+    border-right: 0;
+  }
+  .seg button[aria-pressed="true"] {
+    background: var(--accent);
+    color: var(--accent-fg);
+  }
+
+  .preview-wrap {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .poster {
+    border-radius: 6px;
+    padding: clamp(22px, 5vw, 44px);
+    min-height: 300px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 12px;
+    overflow: hidden;
+  }
+  .poster h3 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-weight: 800;
+    line-height: 1.02;
+    letter-spacing: -0.01em;
+    overflow-wrap: anywhere;
+    text-wrap: balance;
+  }
+  .poster p {
+    margin: 0;
+    max-width: 40ch;
+    font-size: 17px;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    opacity: 0.92;
+  }
+
+  /* Stacks */
+  .stacks {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+  }
+  .shead {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .shead h2 {
+    margin: 0;
+  }
+  .count {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .stack.undo h2 {
+    color: var(--accent);
+  }
+  .stack.redo h2 {
+    color: var(--redo);
+  }
+  .cap {
+    margin: 0 0 10px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .end {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .items {
+    list-style: none;
+    margin: 6px 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 10px;
+    align-items: center;
+    padding: 9px 12px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--surface);
+  }
+  .item.top {
+    background: var(--surface-2);
+    border-color: var(--muted);
+  }
+  .item b {
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .item small {
+    display: block;
+    color: var(--muted);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+  .item .txt {
+    min-width: 0;
+  }
+  .tag {
+    font: 500 11px var(--font-mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .stack.undo .item.top .tag {
+    color: var(--accent);
+  }
+  .stack.redo .item.top .tag {
+    color: var(--redo);
+  }
+  .empty {
+    margin: 6px 0;
+    color: var(--muted);
+  }
+  .item.fresh {
+    animation: drop 0.35s ease-out;
+  }
+  @keyframes drop {
+    from {
+      opacity: 0.2;
+      transform: translateY(-8px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* Log */
+  .trace ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+  .trace li {
+    display: grid;
+    grid-template-columns: 96px minmax(0, 1fr) auto;
+    gap: 4px 12px;
+    align-items: baseline;
+    padding: 7px 0;
+    border-top: 1px solid var(--line);
+  }
+  .trace li:first-child {
+    border-top: 0;
+  }
+  .which {
+    color: var(--muted);
+    font-size: 12px;
+    text-align: right;
+  }
+  .op-push {
+    color: var(--accent);
+    font-weight: 500;
+  }
+  .op-pop {
+    color: var(--redo);
+    font-weight: 500;
+  }
+  .op-clear {
+    color: var(--muted);
+    font-weight: 500;
+  }
+  .note {
+    margin: 14px 0 0;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px 20px;
+  }
+  .note p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
+    max-width: 74ch;
+  }
+  .note .btns {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  @media (max-width: 820px) {
+    .work {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  @media (max-width: 640px) {
+    h1 {
+      font-size: 30px;
+    }
+    .stacks {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .keys {
+      margin-left: 0;
+      width: 100%;
+    }
+    .bar .btn.undo,
+    .bar .btn.redo {
+      flex: 1 1 auto;
+    }
+    .trace li {
+      grid-template-columns: 90px minmax(0, 1fr);
+    }
+    .which {
+      grid-column: 2;
+      text-align: left;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .item.fresh {
+      animation: none;
+    }
+  }
+</style>
+
+<div class="app">
+  <header>
+    <h1>Undo Stack Editor</h1>
+    <p class="sub">
+      Every edit you make is pushed onto an undo stack. Undo pops the newest
+      edit and pushes it onto a redo stack. Watch both stacks change as you work
+      on the poster.
+    </p>
+  </header>
+
+  <section class="panel" aria-label="Undo and redo">
+    <div class="bar">
+      <button class="btn undo" id="undo" type="button">Undo</button>
+      <button class="btn redo" id="redo" type="button">Redo</button>
+      <span class="keys"
+        ><kbd>Ctrl</kbd> + <kbd>Z</kbd> undo · <kbd>Ctrl</kbd> +
+        <kbd>Y</kbd> redo (when no text box is active)</span
+      >
+    </div>
+    <p class="status" id="status" role="status" aria-live="polite"></p>
+  </section>
+
+  <div class="work">
+    <section class="panel" aria-label="Edit poster">
+      <h2>Edit the poster</h2>
+      <form id="form" autocomplete="off" onsubmit="return false;">
+        <div class="field">
+          <label for="title">Headline</label>
+          <input type="text" id="title" maxlength="60" />
+        </div>
+        <div class="field">
+          <label for="body">Details</label>
+          <textarea id="body" maxlength="200"></textarea>
+          <p class="hint">
+            A text edit is saved as one step when you leave the box.
+          </p>
+        </div>
+        <div class="field">
+          <span class="legend" id="cl">Background</span>
+          <div
+            class="swatches"
+            id="swatches"
+            role="group"
+            aria-labelledby="cl"
+          ></div>
+        </div>
+        <div class="field">
+          <span class="legend" id="sl">Headline size</span>
+          <div class="seg" id="sizes" role="group" aria-labelledby="sl">
+            <button type="button" data-s="S" aria-pressed="false">Small</button>
+            <button type="button" data-s="M" aria-pressed="false">
+              Medium
+            </button>
+            <button type="button" data-s="L" aria-pressed="false">Large</button>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel preview-wrap" aria-label="Poster preview">
+      <h2>Preview</h2>
+      <div class="poster" id="poster">
+        <h3 id="pTitle"></h3>
+        <p id="pBody"></p>
+      </div>
+    </section>
+  </div>
+
+  <div class="stacks">
+    <section class="panel stack undo" aria-label="Undo stack">
+      <div class="shead">
+        <h2>Undo stack</h2>
+        <span class="count" id="cU">0 steps</span>
+      </div>
+      <p class="cap">New edits are pushed on top. Undo pops the top step.</p>
+      <div id="stU"></div>
+    </section>
+    <section class="panel stack redo" aria-label="Redo stack">
+      <div class="shead">
+        <h2>Redo stack</h2>
+        <span class="count" id="cR">0 steps</span>
+      </div>
+      <p class="cap">Undone steps wait here. A new edit empties this stack.</p>
+      <div id="stR"></div>
+    </section>
+  </div>
+
+  <section class="panel trace" aria-label="Stack operations">
+    <h2>Stack operations</h2>
+    <ol id="log"></ol>
+    <div class="note">
+      <p>
+        Why a stack? The step you made last is the first one you want to
+        reverse, and that is last in, first out. A queue would undo your oldest
+        edit first, which would leave the poster in the wrong state.
+      </p>
+      <div class="btns">
+        <button class="btn small" id="sample" type="button">Load sample</button>
+        <button class="btn small" id="clear" type="button">Reset poster</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+  (function () {
+    // Last in, first out. The array end is the top, so push, pop and peek are all O(1).
+    class Stack {
+      #a = [];
+      push(x) {
+        this.#a.push(x);
+      }
+      pop() {
+        return this.#a.pop();
+      }
+      peek() {
+        return this.#a[this.#a.length - 1];
+      }
+      isEmpty() {
+        return this.#a.length === 0;
+      }
+      get size() {
+        return this.#a.length;
+      }
+      toArray() {
+        return this.#a.slice().reverse();
+      } // top first, for display
+      clear() {
+        this.#a = [];
+      }
+    }
+
+    const COLORS = [
+      { id: "indigo", name: "Indigo", bg: "#3B2FA8", fg: "#FFFFFF" },
+      { id: "coral", name: "Coral", bg: "#E4572E", fg: "#1F0A04" },
+      { id: "forest", name: "Forest", bg: "#1E5B45", fg: "#FFFFFF" },
+      { id: "sun", name: "Sun", bg: "#F2C230", fg: "#2B2100" },
+      { id: "ink", name: "Ink", bg: "#16151F", fg: "#FFFFFF" },
+      { id: "sky", name: "Sky", bg: "#BFE0F2", fg: "#0E2B3A" },
+    ];
+    const SIZES = { S: 30, M: 46, L: 68 };
+    const SIZE_NAME = { S: "small", M: "medium", L: "large" };
+    const FIELD_NAME = {
+      title: "Headline",
+      body: "Details",
+      color: "Background",
+      size: "Size",
+    };
+    const DEFAULTS = {
+      title: "Clinic open day",
+      body: "Free blood pressure checks.\nSaturday, 9 am to 1 pm.",
+      color: "indigo",
+      size: "M",
+    };
+
+    const undoS = new Stack();
+    const redoS = new Stack();
+    let doc = Object.assign({}, DEFAULTS);
+    let ops = [];
+    let fresh = null;
+
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) =>
+      String(s).replace(
+        /[&<>"']/g,
+        (c) =>
+          ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          })[c],
+      );
+    const trunc = (s, n) => {
+      s = String(s).replace(/\s+/g, " ").trim();
+      return s.length > n ? s.slice(0, n - 1) + "…" : s;
+    };
+    const setStatus = (t) => {
+      $("status").textContent = t;
+    };
+    const colorOf = (id) => COLORS.find((c) => c.id === id) || COLORS[0];
+
+    function show(field, v) {
+      if (field === "color") return colorOf(v).name;
+      if (field === "size") return SIZE_NAME[v];
+      return "“" + trunc(v, 28) + "”";
+    }
+    function describe(c) {
+      return (
+        FIELD_NAME[c.field] +
+        ": " +
+        show(c.field, c.before) +
+        " → " +
+        show(c.field, c.after)
+      );
+    }
+
+    function logOp(op, text) {
+      ops.unshift({ op, text, u: undoS.size, r: redoS.size });
+      if (ops.length > 8) ops.pop();
+    }
+
+    // A new edit: push it on the undo stack and empty the redo stack.
+    function edit(field, value) {
+      if (doc[field] === value) return;
+      const cmd = { field, before: doc[field], after: value };
+      doc[field] = value;
+      undoS.push(cmd);
+      fresh = cmd;
+      const dropped = redoS.size;
+      redoS.clear();
+      logOp("push", "undo ← " + describe(cmd));
+      if (dropped)
+        logOp(
+          "clear",
+          "redo emptied (" +
+            dropped +
+            " step" +
+            (dropped > 1 ? "s" : "") +
+            " lost)",
+        );
+      setStatus(
+        "Saved as a step. " +
+          (dropped
+            ? "The redo stack was emptied because history now branches."
+            : "The undo stack now has " + undoS.size + "."),
+      );
+    }
+
+    function undo() {
+      if (undoS.isEmpty()) {
+        setStatus("Nothing to undo. The undo stack is empty.");
+        return;
+      }
+      const cmd = undoS.pop();
+      doc[cmd.field] = cmd.before;
+      redoS.push(cmd);
+      fresh = cmd;
+      logOp("pop", "undo → " + describe(cmd));
+      logOp("push", "redo ← " + describe(cmd));
+      setStatus(
+        "Undid " +
+          FIELD_NAME[cmd.field].toLowerCase() +
+          ". The step moved to the redo stack.",
+      );
+      render();
+    }
+
+    function redo() {
+      if (redoS.isEmpty()) {
+        setStatus("Nothing to redo. The redo stack is empty.");
+        return;
+      }
+      const cmd = redoS.pop();
+      doc[cmd.field] = cmd.after;
+      undoS.push(cmd);
+      fresh = cmd;
+      logOp("pop", "redo → " + describe(cmd));
+      logOp("push", "undo ← " + describe(cmd));
+      setStatus(
+        "Redid " +
+          FIELD_NAME[cmd.field].toLowerCase() +
+          ". The step moved back to the undo stack.",
+      );
+      render();
+    }
+
+    function stackHTML(s, label) {
+      const items = s.toArray();
+      if (!items.length)
+        return (
+          '<p class="empty">Empty. ' +
+          (label === "undo"
+            ? "Edit the poster to add a step."
+            : "Undo a step and it will appear here.") +
+          "</p>"
+        );
+      return (
+        '<p class="end">Top</p><ol class="items">' +
+        items
+          .map(
+            (c, i) =>
+              '<li class="item' +
+              (i === 0 ? " top" : "") +
+              (c === fresh ? " fresh" : "") +
+              '"><span class="txt"><b>' +
+              esc(FIELD_NAME[c.field]) +
+              "</b><small>" +
+              esc(show(c.field, c.before)) +
+              " → " +
+              esc(show(c.field, c.after)) +
+              '</small></span><span class="tag">' +
+              (i === 0 ? "top" : "") +
+              "</span></li>",
+          )
+          .join("") +
+        '</ol><p class="end">Bottom · oldest</p>'
+      );
+    }
+
+    function render() {
+      // Poster
+      const col = colorOf(doc.color);
+      const poster = $("poster");
+      poster.style.background = col.bg;
+      poster.style.color = col.fg;
+      $("pTitle").textContent = doc.title || " ";
+      $("pTitle").style.fontSize = SIZES[doc.size] + "px";
+      $("pBody").textContent = doc.body;
+
+      // Controls reflect the document without firing change events
+      if ($("title").value !== doc.title) $("title").value = doc.title;
+      if ($("body").value !== doc.body) $("body").value = doc.body;
+      $("swatches").innerHTML = COLORS.map(
+        (c) =>
+          '<button type="button" class="sw" data-c="' +
+          c.id +
+          '" style="background:' +
+          c.bg +
+          '" title="' +
+          c.name +
+          '" aria-label="' +
+          c.name +
+          '" aria-pressed="' +
+          (c.id === doc.color) +
+          '"></button>',
+      ).join("");
+      const sizeBtns = $("sizes").children;
+      for (let i = 0; i < sizeBtns.length; i++)
+        sizeBtns[i].setAttribute(
+          "aria-pressed",
+          String(sizeBtns[i].dataset.s === doc.size),
+        );
+
+      // Stacks
+      $("stU").innerHTML = stackHTML(undoS, "undo");
+      $("stR").innerHTML = stackHTML(redoS, "redo");
+      $("cU").textContent =
+        undoS.size + (undoS.size === 1 ? " step" : " steps");
+      $("cR").textContent =
+        redoS.size + (redoS.size === 1 ? " step" : " steps");
+      $("undo").disabled = undoS.isEmpty();
+      $("redo").disabled = redoS.isEmpty();
+
+      // Log
+      $("log").innerHTML = ops.length
+        ? ops
+            .map(
+              (o) =>
+                '<li><span class="op-' +
+                o.op +
+                '">' +
+                o.op +
+                "</span><span>" +
+                esc(o.text) +
+                '</span><span class="which">undo ' +
+                o.u +
+                " · redo " +
+                o.r +
+                "</span></li>",
+            )
+            .join("")
+        : "<li><span>No operations yet.</span></li>";
+      fresh = null;
+    }
+
+    function reset() {
+      undoS.clear();
+      redoS.clear();
+      doc = Object.assign({}, DEFAULTS);
+      ops = [];
+      fresh = null;
+    }
+
+    function loadSample() {
+      reset();
+      edit("title", "Free health screening");
+      edit("color", "forest");
+      edit("size", "L");
+      edit(
+        "body",
+        "Blood pressure, sugar and BMI checks.\nSaturday, 9 am to 1 pm.",
+      );
+      undo();
+      undo();
+      setStatus(
+        "Sample loaded. Four edits were made and two were undone, so the redo stack holds two steps. Try Redo.",
+      );
+      render();
+    }
+
+    // Events
+    function commitText(id, field) {
+      $(id).addEventListener("change", () => {
+        edit(field, $(id).value);
+        render();
+      });
+    }
+    commitText("title", "title");
+    commitText("body", "body");
+    $("swatches").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-c]");
+      if (b) {
+        edit("color", b.dataset.c);
+        render();
+      }
+    });
+    $("sizes").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-s]");
+      if (b) {
+        edit("size", b.dataset.s);
+        render();
+      }
+    });
+    $("undo").addEventListener("click", undo);
+    $("redo").addEventListener("click", redo);
+    $("sample").addEventListener("click", loadSample);
+    $("clear").addEventListener("click", () => {
+      reset();
+      setStatus("Poster reset and both stacks emptied.");
+      render();
+    });
+    document.addEventListener("keydown", (e) => {
+      const t = e.target && e.target.tagName;
+      if (t === "INPUT" || t === "TEXTAREA") return;
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const k = String(e.key).toLowerCase();
+      if (k === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if (k === "y" || (k === "z" && e.shiftKey)) {
+        e.preventDefault();
+        redo();
+      }
+    });
+
+    loadSample();
+  })();
+</script>
